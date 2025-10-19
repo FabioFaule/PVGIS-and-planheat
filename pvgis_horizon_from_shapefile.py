@@ -8,12 +8,12 @@ Descrizione:
 - Seleziona l'edificio specificato dall'indice in configurazione come edificio under-study
 - Calcola l'userhorizon ogni 10° (configurabile)
 - Calcola l'orientamento del pannello (azimuth) con una regola deterministica
-- [NUOVO] Calcola la Potenza di Picco (peakpower) in base all'area dell'edificio
-- Genera un plot con raggi, annotazioni altezze, e info orientamento
-- [MODIFICATO] Chiama l'API PVGIS (v5_2) 'seriescalc' con userhorizon, aspect e peakpower calcolato
-- [MODIFICATO] Calcola l'energia totale annua (kWh) dalla serie oraria
-- [MODIFICATO] Salva un output_summary.json (senza serie oraria)
-- [NUOVO] Salva un output_hourly_data.csv con la serie oraria completa
+- Calcola la Potenza di Picco (peakpower) in base all'area dell'edificio
+- Genera un plot migliorato (output_plot.png)
+- Chiama l'API PVGIS (v5_2) 'seriescalc' con userhorizon, aspect e peakpower calcolato
+- [FIX: Utilizza startyear/endyear per generare un solo anno di dati (8760 righe)]
+- Calcola l'energia totale annua (kWh) dalla serie oraria
+- Salva output_summary.json e output_hourly_data.csv
 
 Uso:
     python pvgis_horizon_from_shapefile.py path/to/buildings.zip
@@ -22,10 +22,10 @@ Uso:
 Output:
 - stampa userhorizon (stringa pronta per PVGIS)
 - stampa ORIENTATION SUMMARY
-- [NUOVO] stampa PEAKPOWER SUMMARY
+- stampa PEAKPOWER SUMMARY
 - salva un PNG con la mappa e annotazioni (output_plot.png)
-- [MODIFICATO] salva un JSON con i risultati (output_summary.json)
-- [NUOVO] salva un CSV con i dati orari (output_hourly_data.csv)
+- salva un JSON con i risultati (output_summary.json)
+- salva un CSV con i dati orari (output_hourly_data.csv)
 - stampa il risultato JSON minimo ritornato da PVGIS
 
 Note / Assunzioni:
@@ -41,7 +41,7 @@ Requisiti Python (pip):
     numpy
     matplotlib
     requests
-    pandas # Aggiunto per gestione CSV
+    pandas
 """
 
 import sys
@@ -81,7 +81,7 @@ POWER_DENSITY_W_PER_M2 = 200 # Densità di potenza stimata dei pannelli (W/m²)
 
 # 🎯 INDICE DELL'EDIFICIO DA ANALIZZARE
 # L'indice (numero di riga) dell'edificio da analizzare nello shapefile (0 = primo elemento).
-TARGET_BUILDING_INDEX = 23 
+TARGET_BUILDING_INDEX = 0 
 
 
 # ----------------------
@@ -436,13 +436,14 @@ def compute_panel_orientation(geometry, crs_projected=True):
 
 
 # ----------------------
-# PVGIS call (invariate)
+# PVGIS call (MODIFICATA)
 # ----------------------
 
 def call_pvgis_seriescalc(lat, lon, userhorizon_str, peakpower, tilt=None, aspect=None):
     """
     Chiamata API PVGIS v5_2 (seriescalc).
     Ritorna il JSON completo.
+    [MODIFICA]: Aggiunge startyear e endyear per limitare l'output a un solo anno (8760 righe).
     """
     # Se tilt non fornito, usa il default
     if tilt is None:
@@ -459,7 +460,13 @@ def call_pvgis_seriescalc(lat, lon, userhorizon_str, peakpower, tilt=None, aspec
         # Parametri seriescalc
         'pvcalculation': 1,  # Per dati orari
         'outputformat': 'json',
-        'browser': 0,        # Rimosso from=2020&to=2020 per avere l'anno tipico
+        'browser': 0,
+        # *** FIX PER TMY/ANNO SINGOLO ***
+        # Forza l'output a un solo anno (8760 righe) per simulare un anno tipico (TMY)
+        # La vera TMY richiederebbe l'endpoint /tmy
+        'startyear': 2020,
+        'endyear': 2020,
+        # *******************************
         # Parametri PVcalc
         'usehorizon': 1,
         'userhorizon': userhorizon_str,
@@ -478,7 +485,7 @@ def call_pvgis_seriescalc(lat, lon, userhorizon_str, peakpower, tilt=None, aspec
 
 
 # ----------------------
-# Plot (MODIFICATA)
+# Plot (invariata rispetto all'ultimo miglioramento)
 # ----------------------
 
 def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, out_png=PLOT_OUTPUT):
@@ -557,7 +564,7 @@ def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, ou
             arrow_len = min(RAY_LENGTH_M * 0.3, max(orientation_results.get('long_side_length', 50), 50))
             
             # [MODIFICA 2]: Ridimensiono la testa della freccia
-            head_size_ratio = 0.08 # Ridotto da 0.1 a 0.08 per larghezza e da 0.15 a 0.12 per lunghezza
+            head_size_ratio = 0.08 
             dx_a = arrow_len * math.sin(math.radians(panel_az))
             dy_a = arrow_len * math.cos(math.radians(panel_az))
             
@@ -567,9 +574,9 @@ def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, ou
                      label='Pannello Azimuth')
             
             # [MODIFICA 3]: Aumento la dimensione del testo e lo sposto leggermente
-            ax.text(centroid.x + dx_a * 1.5, centroid.y + dy_a * 1.5, # Posizione relativa alla freccia
+            ax.text(centroid.x + dx_a * 1.15, centroid.y + dy_a * 1.15, 
                     f"Panel Az: {panel_az}°\n(Aspect: {pvgis_asp}°)",
-                    color='magenta', fontsize=FONT_SIZE_HORIZON, ha='center', va='center', weight='bold')
+                    color='magenta', fontsize=FONT_SIZE_HORIZON+2, ha='center', va='center', weight='bold')
 
         # Plot label Incertezza
         if orientation_results.get('uncertain_orientation_flag'):
@@ -594,21 +601,18 @@ def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, ou
     minx, miny, maxx, maxy = target.total_bounds
     
     # La lunghezza massima è RAY_LENGTH_M. Lo zoom deve coprire l'edificio target
-    # più la lunghezza del raggio in ogni direzione
-    buffer_zoom = RAY_LENGTH_M * 0.1 # 60% della lunghezza del raggio come buffer
+    buffer_zoom = RAY_LENGTH_M * 1.1 
     
     # Calcolo dei limiti basato sul centroide e sul buffer
-    x_min_new = min(gdf.total_bounds[0] + RAY_LENGTH_M * 0.5, centroid.x - buffer_zoom)
-    y_min_new = min(gdf.total_bounds[1] + RAY_LENGTH_M * 0.5, centroid.y - buffer_zoom)
-    x_max_new = max(gdf.total_bounds[2] -  RAY_LENGTH_M * 0.5, centroid.x + buffer_zoom)
-    y_max_new = max(gdf.total_bounds[3] -  RAY_LENGTH_M * 0.5 , centroid.y + buffer_zoom)
-    
-    # Limitiamo l'area di visualizzazione per includere tutti gli elementi principali
-    # e i raggi principali (lunghezza massima del raggio: RAY_LENGTH_M)
-    max_extent = max(x_max_new - x_min_new, y_max_new - y_min_new)
-    
-    # Centriamo il plot sul centroide target per avere una visuale simmetrica sui raggi
     center_x, center_y = centroid.x, centroid.y
+    
+    # Determino l'estensione massima necessaria e la applico simmetricamente dal centroide
+    x_min_new = min(gdf.total_bounds[0], centroid.x - buffer_zoom)
+    y_min_new = min(gdf.total_bounds[1], centroid.y - buffer_zoom)
+    x_max_new = max(gdf.total_bounds[2], centroid.x + buffer_zoom)
+    y_max_new = max(gdf.total_bounds[3], centroid.y + buffer_zoom)
+    
+    max_extent = max(x_max_new - x_min_new, y_max_new - y_min_new) * 1.05 # 5% in più per i margini
     half_max_extent = max_extent / 2.0
     
     ax.set_xlim(center_x - half_max_extent, center_x + half_max_extent)
@@ -625,8 +629,7 @@ def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, ou
 # Applica la legenda usando gli elementi fittizi
     ax.legend(handles=legend_elements, loc='best', fontsize=FONT_SIZE_HORIZON)
     
-    # [MODIFICA 7]: Rimuovi plt.tight_layout() e usa bbox_inches='tight' in savefig 
-    # per evitare il warning e migliorare l'uso dello spazio.
+    # [MODIFICA 7]: Usa bbox_inches='tight' in savefig 
     plt.savefig(out_png, dpi=400, bbox_inches='tight') 
     print(f"\nPlot saved to: {out_png}")
     plt.close(fig)
@@ -635,7 +638,6 @@ def plot_scene(gdf, target_idx, centroid, horizon_items, orientation_results, ou
 # ----------------------
 # Test function (invariata)
 # ----------------------
-# ... Omissis ... (La funzione run_orientation_tests è invariata)
 
 def run_orientation_tests():
     """Esegue test di validazione per la funzione compute_panel_orientation."""
@@ -767,6 +769,7 @@ def main(zip_path):
         # Usiamo l'aspect calcolato
         pvgis_aspect = orientation_results['pvgis_aspect']
         
+        # Ora la chiamata userà solo l'anno 2020 (8760 righe)
         print(f"\nCalling PVGIS seriescalc for lat={lat_pt:.6f}, lon={lon_pt:.6f} (peakpower={peakpower_kwp} kWp)")
         print(f"  Using calculated aspect={pvgis_aspect:.1f} (Tilt={DEFAULT_TILT_FOR_ASPECT}° [default])")
 
